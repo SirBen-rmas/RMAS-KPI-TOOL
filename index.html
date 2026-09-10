@@ -44,6 +44,8 @@ button{border:0;border-radius:10px;padding:11px 14px;font-weight:850;cursor:poin
   .store-actions{display:grid;grid-template-columns:1fr 1fr}
   .store-actions button{width:100%!important}
 }
+  .syncbtn{min-width:130px}
+  .sync-status{margin:8px 0 14px;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:#f8fafc;color:#475569;font-size:12px}
 </style>
 </head>
 <body>
@@ -59,11 +61,13 @@ button{border:0;border-radius:10px;padding:11px 14px;font-weight:850;cursor:poin
  <select id="fStore" disabled><option value="">All Stores</option></select>
  <select id="fBU"><option value="">All Business Units</option><option>AV</option><option>HA</option><option>AC</option></select>
  <button class="secondary" onclick="resetFilters()">Reset</button>
+ <button type="button" id="syncNowBtn" class="primary syncbtn" onclick="manualSync()">↻ Sync Now</button>
  <button class="primary" onclick="window.print()">Print / Save PDF</button>
 </section>
 <div class="managebar no-print"><button class="secondary" onclick="openMasterManager()">⚙ Manage Trade Supervisors & Stores</button></div>
 <div class="count" id="mapCount"></div>
 <div id="notice" class="notice"></div>
+<div class="sync-status no-print" id="syncStatus">Shared data is not auto-synced. Press <b>↻ Sync Now</b> to refresh from Google Sheet.</div>
 
 <section class="cards">
  <div class="card"><div class="label">KPI ACHIEVEMENT</div><div class="num" id="kpi">0%</div><div class="small">Full deployment / expected</div></div>
@@ -116,7 +120,6 @@ let records=[];
 let MAPPING=BASE_MAPPING.map(x=>({...x}));
 let masterChanges=[];
 let syncBusy=false;
-let syncTimer=null;
 let recordIndex=new Map();
 const canUseSharedApi=()=>/^https?:$/i.test(location.protocol)&&/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(API_URL);
 function uniq(a){return [...new Set(a)].sort((x,y)=>String(x).localeCompare(String(y)));}
@@ -154,8 +157,12 @@ function rebuildRecordIndex(){recordIndex=new Map();for(const r of records){reco
 function getRecord(region,ts,store,bu){return recordIndex.get(recordKey({region,ts,store,bu}));}
 
 async function syncShared(silent=false){
-  if(!canUseSharedApi()){show("Local Preview: shared Google Sheet sync activates when this HTML is published on HTTPS/GitHub.","ok");return;}
-  if(syncBusy)return; syncBusy=true;
+  if(!canUseSharedApi()){
+    if(!silent)show("Shared Google Sheet sync is available on the published HTTPS version.","err");
+    return false;
+  }
+  if(syncBusy)return false;
+  syncBusy=true;
   try{
     const data=await jsonp("getAll");
     records=Array.isArray(data.records)?data.records:[];
@@ -164,10 +171,25 @@ async function syncShared(silent=false){
     applyMasterChanges();
     refreshAllMappingUI();
     render();
-    if(!silent)show("Synced with the shared Google Sheet.","ok");
-  }catch(e){if(!silent)show("Sync failed: "+e.message,"err");}
-  finally{syncBusy=false;}
+    const now=new Date().toLocaleString("en-PH",{year:"numeric",month:"short",day:"2-digit",hour:"2-digit",minute:"2-digit"});
+    $("syncStatus").innerHTML="✓ Last synced from Google Sheet: <b>"+esc(now)+"</b> • Automatic sync is OFF.";
+    if(!silent)show("✓ Synced with the shared Google Sheet.","ok");
+    return true;
+  }catch(e){
+    if(!silent)show("Sync failed: "+e.message,"err");
+    return false;
+  }finally{syncBusy=false;}
 }
+
+async function manualSync(){
+  const btn=$("syncNowBtn");
+  if(syncBusy)return;
+  if(btn){btn.disabled=true;btn.textContent="↻ Syncing…";}
+  $("syncStatus").textContent="Syncing with the shared Google Sheet…";
+  try{await syncShared(false);}
+  finally{if(btn){btn.disabled=false;btn.textContent="↻ Sync Now";}}
+}
+
 function init(){
  const regs=masterRegions();
  fillSelect("fRegion",regs,"All Regions");fillSelect("inRegion",regs,"Select Region");
@@ -175,8 +197,7 @@ function init(){
  $("inRegion").onchange=syncInput;$("inTS").onchange=syncInput;
  const saved=localStorage.getItem("rmas_name");if(saved)$("inRMAS").value=saved;
  syncInput();syncDashboard();
- if(canUseSharedApi()){syncShared(true);syncTimer=setInterval(()=>syncShared(true),15000);}
- else show("Local Preview mode: no network connection is used. Publish this HTML to HTTPS/GitHub for shared Google Sheet sync.","ok");
+ if(!canUseSharedApi()) show("Local Preview mode: publish this HTML to HTTPS/GitHub to use the shared Google Sheet.","ok");
 }
 function syncInput(){
  const r=$("inRegion").value,oldTS=$("inTS").value;
@@ -208,14 +229,17 @@ function syncDashboard(){
  render();
 }
 function refreshAllMappingUI(){
- const fr=$("fRegion").value,fts=$("fTS").value,fs=$("fStore").value,ir=$("inRegion").value,its=$("inTS").value,is=$("inStore").value;
+ const fr=$("fRegion").value,fts=$("fTS").value,fs=$("fStore").value,ir=$("inRegion").value,its=$("inTS").value,is=[...$("inStore").selectedOptions].map(o=>o.value);
  fillSelect("fRegion",masterRegions(),"All Regions");fillSelect("inRegion",masterRegions(),"Select Region");
  if(fr&&masterRegions().includes(fr))$("fRegion").value=fr;if(ir&&masterRegions().includes(ir))$("inRegion").value=ir;
  syncDashboard();syncInput();
  if(fts&&$("fTS").querySelector(`option[value="${CSS.escape(fts)}"]`))$("fTS").value=fts;
  if(fs&&$("fStore").querySelector(`option[value="${CSS.escape(fs)}"]`))$("fStore").value=fs;
  if(its&&$("inTS").querySelector(`option[value="${CSS.escape(its)}"]`))$("inTS").value=its;
- if(is&&$("inStore").querySelector(`option[value="${CSS.escape(is)}"]`))$("inStore").value=is;
+ if(Array.isArray(is)){
+   [...$("inStore").options].forEach(o=>o.selected=is.includes(o.value));
+   updateStoreSelectionHint();
+ }
  renderMasterList();
 }
 function openMasterManager(){
@@ -233,19 +257,43 @@ async function addTradeSupervisor(){
  const r=$("mAddRegion").value,n=$("mNewTS").value.trim();if(!r||!n){show("Select Region and enter the new Trade Supervisor name.","err");return;}
  if(MAPPING.some(x=>x.region===r&&x.ts.toLowerCase()===n.toLowerCase())){show("That Trade Supervisor already exists in this Region.","err");return;}
  if(!canUseSharedApi()){show("Connect this tool to the new Google Sheet Web App before changing shared master data.","err");return;}
- try{await jsonp("addTS",{region:r,ts:n});$("mNewTS").value="";await syncShared(true);openMasterManager();$("mAddRegion").value=r;show("Trade Supervisor added and shared with all RMAS users.","ok");}catch(e){show("Add TS failed: "+e.message,"err");}
+ try{
+   await jsonp("addTS",{region:r,ts:n});
+   masterChanges.push({action:"ADD_TS",region:r,ts:n});
+   applyMasterChanges();
+   $("mNewTS").value="";
+   refreshAllMappingUI();
+   openMasterManager();$("mAddRegion").value=r;
+   show("Trade Supervisor added to the shared Google Sheet. Press Sync Now on other devices to refresh.","ok");
+ }catch(e){show("Add TS failed: "+e.message,"err");}
 }
 async function renameTradeSupervisor(){
  const r=$("mRenameRegion").value,old=$("mOldTS").value,n=$("mNewTSName").value.trim();if(!r||!old||!n){show("Select Region, Trade Supervisor and enter the new name.","err");return;}
  if(MAPPING.some(x=>x.region===r&&x.ts.toLowerCase()===n.toLowerCase()&&x.ts!==old)){show("That Trade Supervisor name already exists in this Region.","err");return;}
  if(!canUseSharedApi()){show("Connect this tool to the new Google Sheet Web App before changing shared master data.","err");return;}
- try{await jsonp("renameTS",{region:r,oldTS:old,newTS:n});$("mNewTSName").value="";await syncShared(true);openMasterManager();$("mRenameRegion").value=r;syncManagerTS();$("mOldTS").value=n;show("Trade Supervisor renamed and shared with all RMAS users.","ok");}catch(e){show("Rename failed: "+e.message,"err");}
+ try{
+   await jsonp("renameTS",{region:r,oldTS:old,newTS:n});
+   masterChanges.push({action:"RENAME_TS",region:r,oldTS:old,ts:n});
+   applyMasterChanges();
+   $("mNewTSName").value="";
+   refreshAllMappingUI();
+   openMasterManager();$("mRenameRegion").value=r;syncManagerTS();$("mOldTS").value=n;
+   show("Trade Supervisor renamed in the shared Google Sheet. Press Sync Now on other devices to refresh.","ok");
+ }catch(e){show("Rename failed: "+e.message,"err");}
 }
 async function addStore(){
  const r=$("mStoreRegion").value,t=$("mStoreTS").value,n=$("mNewStore").value.trim();if(!r||!t||!n){show("Select Region, Trade Supervisor and enter the new Store name.","err");return;}
  if(MAPPING.some(x=>x.region===r&&x.ts===t&&x.store===n)){show("That Store already exists under this Trade Supervisor.","err");return;}
  if(!canUseSharedApi()){show("Connect this tool to the new Google Sheet Web App before changing shared master data.","err");return;}
- try{await jsonp("addStore",{region:r,ts:t,store:n});$("mNewStore").value="";await syncShared(true);openMasterManager();$("mStoreRegion").value=r;syncManagerStoreTS();$("mStoreTS").value=t;show("Store added and shared with all RMAS users.","ok");}catch(e){show("Add Store failed: "+e.message,"err");}
+ try{
+   await jsonp("addStore",{region:r,ts:t,store:n});
+   masterChanges.push({action:"ADD_STORE",region:r,ts:t,store:n});
+   applyMasterChanges();
+   $("mNewStore").value="";
+   refreshAllMappingUI();
+   openMasterManager();$("mStoreRegion").value=r;syncManagerStoreTS();$("mStoreTS").value=t;
+   show("Store added to the shared Google Sheet. Press Sync Now on other devices to refresh.","ok");
+ }catch(e){show("Add Store failed: "+e.message,"err");}
 }
 function selectedStores(){const r=$("fRegion").value,t=$("fTS").value,s=$("fStore").value;return MAPPING.filter(x=>x.store&&(!r||x.region===r)&&(!t||x.ts===t)&&(!s||x.store===s));}
 function kpiStatus(st){return st==="Complete POSM"||st==="Incomplete POSM - Full Deployment"?100:0;}
@@ -326,8 +374,12 @@ async function addDeployment(event){
    }
 
    if(rmas)localStorage.setItem("rmas_name",rmas);
+   // Update this device immediately without another Google Sheet read.
+   const localByKey=new Map(records.map(x=>[recordKey(x),x]));
+   recordsToSave.forEach(rec=>localByKey.set(recordKey(rec),rec));
+   records=[...localByKey.values()];
+   rebuildRecordIndex();
    render();
-   syncShared(true); // background verification; don't make the user wait for a second full read
    $("inRemarks").value="";
    [...$("inStore").options].forEach(o=>o.selected=false);
    updateStoreSelectionHint();
@@ -342,8 +394,26 @@ async function addDeployment(event){
    }
  }
 }
-async function del(i){if(!confirm("Delete this deployment record?"))return;if(!canUseSharedApi()){show("Publish this HTML to HTTPS/GitHub before editing shared records.","err");return;}const z=records[i];if(!z)return;try{await jsonp("deleteDeployment",{region:z.region,ts:z.ts,store:z.store,bu:z.bu});await syncShared(true);show("Deployment deleted from the shared database.","ok");}catch(e){show("Delete failed: "+e.message,"err");}}
-async function clearData(){if(!confirm("Clear ALL deployment entries for all RMAS users? This cannot be undone."))return;if(!canUseSharedApi()){show("Publish this HTML to HTTPS/GitHub before clearing shared records.","err");return;}try{await jsonp("clearDeployments");await syncShared(true);show("All shared deployment entries were cleared.","ok");}catch(e){show("Clear failed: "+e.message,"err");}}
+async function del(i){
+ if(!confirm("Delete this deployment record?"))return;
+ if(!canUseSharedApi()){show("Publish this HTML to HTTPS/GitHub before editing shared records.","err");return;}
+ const z=records[i];if(!z)return;
+ try{
+   await jsonp("deleteDeployment",{region:z.region,ts:z.ts,store:z.store,bu:z.bu});
+   records=records.filter(x=>recordKey(x)!==recordKey(z));
+   rebuildRecordIndex();render();
+   show("Deployment deleted from the shared database. Press Sync Now on other devices to refresh.","ok");
+ }catch(e){show("Delete failed: "+e.message,"err");}
+}
+async function clearData(){
+ if(!confirm("Clear ALL deployment entries for all RMAS users? This cannot be undone."))return;
+ if(!canUseSharedApi()){show("Publish this HTML to HTTPS/GitHub before clearing shared records.","err");return;}
+ try{
+   await jsonp("clearDeployments");
+   records=[];rebuildRecordIndex();render();
+   show("All shared deployment entries were cleared. Press Sync Now on other devices to refresh.","ok");
+ }catch(e){show("Clear failed: "+e.message,"err");}
+}
 function resetFilters(){["fRegion","fTS","fStore","fBU"].forEach(id=>$(id).value="");fillSelect("fTS",[],"All Trade Supervisors",true);fillSelect("fStore",[],"All Stores",true);syncDashboard();}
 function selectAllInputStores(){
  const el=$("inStore");
