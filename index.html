@@ -117,6 +117,7 @@ let MAPPING=BASE_MAPPING.map(x=>({...x}));
 let masterChanges=[];
 let syncBusy=false;
 let syncTimer=null;
+let recordIndex=new Map();
 const canUseSharedApi=()=>/^https?:$/i.test(location.protocol)&&/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(API_URL);
 function uniq(a){return [...new Set(a)].sort((x,y)=>String(x).localeCompare(String(y)));}
 function esc(v){return String(v).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));}
@@ -148,12 +149,17 @@ function jsonp(action,params={}){
     s.src=API_URL+"?"+q.toString();document.body.appendChild(s);
   });
 }
+function recordKey(r){return [r?.region,r?.ts,r?.store,r?.bu].map(v=>String(v??"")).join("\u001f");}
+function rebuildRecordIndex(){recordIndex=new Map();for(const r of records){recordIndex.set(recordKey(r),r);}}
+function getRecord(region,ts,store,bu){return recordIndex.get(recordKey({region,ts,store,bu}));}
+
 async function syncShared(silent=false){
   if(!canUseSharedApi()){show("Local Preview: shared Google Sheet sync activates when this HTML is published on HTTPS/GitHub.","ok");return;}
   if(syncBusy)return; syncBusy=true;
   try{
     const data=await jsonp("getAll");
     records=Array.isArray(data.records)?data.records:[];
+    rebuildRecordIndex();
     masterChanges=Array.isArray(data.masterChanges)?data.masterChanges:[];
     applyMasterChanges();
     refreshAllMappingUI();
@@ -307,20 +313,21 @@ async function addDeployment(event){
      btn.textContent="Saving…";
    }
 
-   for(let i=0;i<recordsToSave.length;i++){
-     show("Saving "+(i+1)+" of "+recordsToSave.length+" store(s)…","ok");
-     try{
-       await jsonp("saveDeployment",{data:JSON.stringify(recordsToSave[i])});
-     }catch(firstError){
-       // Apps Script can occasionally block a JSONP callback on some hosted browsers.
-       // Retry the same upsert through a hidden GET iframe; the backend key makes this safe.
-       show("Retrying save "+(i+1)+" of "+recordsToSave.length+"…","ok");
-       await saveDeploymentFallback(recordsToSave[i]);
-     }
+   show("Saving "+recordsToSave.length+" store(s) in one batch…","ok");
+   try{
+     await jsonp("saveDeployments",{data:JSON.stringify(recordsToSave)});
+   }catch(batchError){
+     // Compatibility fallback if the deployed Apps Script is still the older version.
+     const results=await Promise.all(recordsToSave.map(async rec=>{
+       try{await jsonp("saveDeployment",{data:JSON.stringify(rec)});return true;}
+       catch(e){await saveDeploymentFallback(rec);return true;}
+     }));
+     if(results.length!==recordsToSave.length)throw batchError;
    }
 
    if(rmas)localStorage.setItem("rmas_name",rmas);
-   await syncShared(true);
+   render();
+   syncShared(true); // background verification; don't make the user wait for a second full read
    $("inRemarks").value="";
    [...$("inStore").options].forEach(o=>o.selected=false);
    updateStoreSelectionHint();
@@ -362,15 +369,15 @@ function show(msg,type){const n=$("notice");n.className="notice show "+type;n.te
 function fmtDate(v){if(!v)return"—";let d=new Date(v);return isNaN(d)?"—":d.toLocaleString("en-PH",{year:"numeric",month:"short",day:"2-digit",hour:"2-digit",minute:"2-digit"});}
 function render(){
  const mapped=selectedStores(),buFilter=$("fBU").value,bus=buFilter?[buFilter]:BUs;let expected=mapped.length*bus.length,full=0,inc=0,last=null;const out=[];const statusCounts={"Complete POSM":0,"Incomplete POSM":0,"Incomplete POSM - Full Deployment":0};
- mapped.forEach(x=>bus.forEach(b=>{const z=records.find(q=>q.region===x.region&&q.ts===x.ts&&q.store===x.store&&q.bu===b);const st=z?.status||"Incomplete POSM";if(z)statusCounts[st]=(statusCounts[st]||0)+1;if(z){if(kpiStatus(st)===100)full++;else inc++;if(!last||z.updated>last.updated)last=z;}else inc++;out.push({x,b,z,st});}));
+ mapped.forEach(x=>bus.forEach(b=>{const z=getRecord(x.region,x.ts,x.store,b);const st=z?.status||"Incomplete POSM";if(z)statusCounts[st]=(statusCounts[st]||0)+1;if(z){if(kpiStatus(st)===100)full++;else inc++;if(!last||z.updated>last.updated)last=z;}else inc++;out.push({x,b,z,st});}));
  const pct=expected?Math.round(full/expected*100):0;$("kpi").textContent=pct+"%";$("expected").textContent=expected.toLocaleString();$("full").textContent=full.toLocaleString();$("inc").textContent=inc.toLocaleString();$("updated").textContent=last?fmtDate(last.updated):"—";$("rmasLast").textContent=last?("Last input by "+last.rmas):"No deployment input yet";$("mapCount").textContent=`Mapped stores in view: ${mapped.length.toLocaleString()} • BUs counted: ${bus.join(" • ")}`;
  renderStatus(statusCounts,expected);renderBU(mapped,bus);renderRegion(mapped,bus);renderRows(out);
 }
 function renderStatus(c,total){const colors=["#16a34a","#ef4444","#2563eb"];let vals=[c["Complete POSM"],c["Incomplete POSM"],c["Incomplete POSM - Full Deployment"]];const sum=vals.reduce((a,b)=>a+b,0)||1;let start=0,parts=[];vals.forEach((v,i)=>{let end=start+v/sum*360;parts.push(`${colors[i]} ${start}deg ${end}deg`);start=end;});$("statusDonut").style.background=`conic-gradient(${parts.join(",")})`;$("statusTotal").textContent=vals.reduce((a,b)=>a+b,0);const names=["Complete POSM","Incomplete POSM","Incomplete POSM - Full Deployment"];$("statusLegend").innerHTML=names.map((n,i)=>`<div><span class="dot" style="background:${colors[i]}"></span><span>${esc(n)} — <b>${vals[i]}</b></span></div>`).join("");}
-function renderBU(mapped,bus){$("buBars").innerHTML=bus.map(b=>{let exp=mapped.length,full=mapped.reduce((n,x)=>{let z=records.find(q=>q.region===x.region&&q.ts===x.ts&&q.store===x.store&&q.bu===b);return n+(z&&kpiStatus(z.status)===100?1:0)},0);let pct=exp?Math.round(full/exp*100):0;return `<div class="barrow"><b>${b}</b><div class="barbg"><div class="bar" style="width:${pct}%"></div></div><div class="barval">${pct}%</div></div>`;}).join("");}
-function renderRegion(mapped,bus){const groups={};mapped.forEach(x=>{if(!groups[x.region])groups[x.region]={exp:0,full:0};bus.forEach(b=>{groups[x.region].exp++;let z=records.find(q=>q.region===x.region&&q.ts===x.ts&&q.store===x.store&&q.bu===b);if(z&&kpiStatus(z.status)===100)groups[x.region].full++;})});const entries=Object.entries(groups).sort((a,b)=>b[1].exp-a[1].exp);const total=entries.reduce((a,[,v])=>a+v.exp,0),full=entries.reduce((a,[,v])=>a+v.full,0);$("regionKpi").textContent=(total?Math.round(full/total*100):0)+"%";const colors=["#1428a0","#16a34a","#f59e0b","#ef4444","#7c3aed","#0891b2","#db2777","#64748b"];let start=0,parts=[];entries.forEach(([,v],i)=>{let deg=v.exp/Math.max(total,1)*360;parts.push(`${colors[i%colors.length]} ${start}deg ${start+deg}deg`);start+=deg;});$("regionDonut").style.background=`conic-gradient(${parts.join(",")})`;$("regionLegend").innerHTML=entries.slice(0,8).map(([n,v],i)=>`<div><span class="dot" style="background:${colors[i%colors.length]}"></span><span>${esc(n)} — <b>${v.exp?Math.round(v.full/v.exp*100):0}%</b></span></div>`).join("");}
+function renderBU(mapped,bus){$("buBars").innerHTML=bus.map(b=>{let exp=mapped.length,full=mapped.reduce((n,x)=>{let z=getRecord(x.region,x.ts,x.store,b);return n+(z&&kpiStatus(z.status)===100?1:0)},0);let pct=exp?Math.round(full/exp*100):0;return `<div class="barrow"><b>${b}</b><div class="barbg"><div class="bar" style="width:${pct}%"></div></div><div class="barval">${pct}%</div></div>`;}).join("");}
+function renderRegion(mapped,bus){const groups={};mapped.forEach(x=>{if(!groups[x.region])groups[x.region]={exp:0,full:0};bus.forEach(b=>{groups[x.region].exp++;let z=getRecord(x.region,x.ts,x.store,b);if(z&&kpiStatus(z.status)===100)groups[x.region].full++;})});const entries=Object.entries(groups).sort((a,b)=>b[1].exp-a[1].exp);const total=entries.reduce((a,[,v])=>a+v.exp,0),full=entries.reduce((a,[,v])=>a+v.full,0);$("regionKpi").textContent=(total?Math.round(full/total*100):0)+"%";const colors=["#1428a0","#16a34a","#f59e0b","#ef4444","#7c3aed","#0891b2","#db2777","#64748b"];let start=0,parts=[];entries.forEach(([,v],i)=>{let deg=v.exp/Math.max(total,1)*360;parts.push(`${colors[i%colors.length]} ${start}deg ${start+deg}deg`);start+=deg;});$("regionDonut").style.background=`conic-gradient(${parts.join(",")})`;$("regionLegend").innerHTML=entries.slice(0,8).map(([n,v],i)=>`<div><span class="dot" style="background:${colors[i%colors.length]}"></span><span>${esc(n)} — <b>${v.exp?Math.round(v.full/v.exp*100):0}%</b></span></div>`).join("");}
 function renderRows(out){$("rows").innerHTML=out.map((q,i)=>`<tr><td>${esc(q.x.region)}</td><td>${esc(q.x.ts)}</td><td>${esc(q.x.store)}</td><td><b>${q.b}</b></td><td><span class="pill ${q.st==="Complete POSM"?"complete":q.st==="Incomplete POSM - Full Deployment"?"fullstatus":"incomplete"}">${esc(q.st)}</span></td><td class="${kpiStatus(q.st)===100?"kpi100":"kpi0"}">${kpiStatus(q.st)}%</td><td>${esc(q.z?.remarks||"Not yet reported")}</td><td>${fmtDate(q.z?.updated)}</td><td>${esc(q.z?.rmas||"—")}</td><td class="no-print">${q.z?`<button class="danger" onclick="del(${records.indexOf(q.z)})">Delete</button>`:""}</td></tr>`).join("");}
-function exportCSV(){const mapped=selectedStores(),bus=$("fBU").value?[$("fBU").value]:BUs;const rows=[["Region","Trade Supervisor","Store","BU","Status","KPI","Remarks","Updated","RMAS"]];mapped.forEach(x=>bus.forEach(b=>{let z=records.find(q=>q.region===x.region&&q.ts===x.ts&&q.store===x.store&&q.bu===b);rows.push([x.region,x.ts,x.store,b,z?.status||"Incomplete POSM",z?kpiStatus(z.status):0,z?.remarks||"Not yet reported",z?.updated||"",z?.rmas||""])}));const csv=rows.map(r=>r.map(v=>`"${String(v).replaceAll('"','""')}"`).join(",")).join("\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="RMAS_POSM_KPI_"+new Date().toISOString().slice(0,10)+".csv";a.click();}
+function exportCSV(){const mapped=selectedStores(),bus=$("fBU").value?[$("fBU").value]:BUs;const rows=[["Region","Trade Supervisor","Store","BU","Status","KPI","Remarks","Updated","RMAS"]];mapped.forEach(x=>bus.forEach(b=>{let z=getRecord(x.region,x.ts,x.store,b);rows.push([x.region,x.ts,x.store,b,z?.status||"Incomplete POSM",z?kpiStatus(z.status):0,z?.remarks||"Not yet reported",z?.updated||"",z?.rmas||""])}));const csv=rows.map(r=>r.map(v=>`"${String(v).replaceAll('"','""')}"`).join(",")).join("\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="RMAS_POSM_KPI_"+new Date().toISOString().slice(0,10)+".csv";a.click();}
 function copySummary(){const text=`RMAS POSM KPI Update\nKPI Achievement: ${$("kpi").textContent}\nExpected Deployments: ${$("expected").textContent}\nFull Deployment: ${$("full").textContent}\nIncomplete: ${$("inc").textContent}\nLast Updated: ${$("updated").textContent}`;navigator.clipboard?.writeText(text).then(()=>show("Email summary copied. Paste it into your email.","ok")).catch(()=>show(text,"ok"));}
 init();
 </script>
